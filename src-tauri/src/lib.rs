@@ -183,20 +183,25 @@ fn initialize_schema(conn: &Connection) -> Result<(), String> {
 
 fn seed_default_categories(conn: &Connection) -> Result<(), String> {
     let defaults = [
-        ("本業売上", "income", 1_i64),
-        ("出前売上", "income", 1_i64),
-        ("売上", "income", 0_i64),
-        ("固定資産", "expense", 1_i64),
-        ("家賃", "expense", 1_i64),
-        ("租税公課", "expense", 1_i64),
-        ("光熱費", "expense", 1_i64),
-        ("交通費", "expense", 1_i64),
+        ("売上", "income", 1_i64),
+        ("雑収入", "income", 1_i64),
+        ("仕入高", "expense", 1_i64),
+        ("外注工賃", "expense", 1_i64),
+        ("荷造運賃", "expense", 1_i64),
+        ("水道光熱費", "expense", 1_i64),
+        ("地代家賃", "expense", 1_i64),
+        ("旅費交通費", "expense", 1_i64),
         ("通信費", "expense", 1_i64),
-        ("接待費", "expense", 1_i64),
-        ("保険料", "expense", 1_i64),
+        ("広告宣伝費", "expense", 1_i64),
+        ("接待交際費", "expense", 1_i64),
+        ("損害保険料", "expense", 1_i64),
         ("修繕費", "expense", 1_i64),
-        ("消耗品", "expense", 1_i64),
-        ("車両代", "expense", 1_i64),
+        ("消耗品費", "expense", 1_i64),
+        ("減価償却費", "expense", 1_i64),
+        ("福利厚生費", "expense", 1_i64),
+        ("給料賃金", "expense", 1_i64),
+        ("支払手数料", "expense", 1_i64),
+        ("租税公課", "expense", 1_i64),
         ("雑費", "expense", 1_i64),
     ];
 
@@ -432,11 +437,7 @@ fn create_category(app: AppHandle, draft: CategoryDraft) -> Result<Category, Str
         return Err("カテゴリ名は必須です".to_string());
     }
     let kind = normalize_category_kind(&draft.kind).ok_or("カテゴリ種別が不正です")?;
-    let input_enabled = if normalized_name == "売上" {
-        false
-    } else {
-        draft.input_enabled
-    };
+    let input_enabled = draft.input_enabled;
 
     conn.execute(
         "INSERT INTO categories(name, kind, input_enabled) VALUES(?1, ?2, ?3)",
@@ -460,11 +461,7 @@ fn update_category(app: AppHandle, id: i64, draft: CategoryDraft) -> Result<Cate
         return Err("カテゴリ名は必須です".to_string());
     }
     let kind = normalize_category_kind(&draft.kind).ok_or("カテゴリ種別が不正です")?;
-    let input_enabled = if normalized_name == "売上" {
-        false
-    } else {
-        draft.input_enabled
-    };
+    let input_enabled = draft.input_enabled;
 
     let affected = conn
         .execute(
@@ -999,7 +996,7 @@ fn get_or_create_category(
         Some(id) => id,
         None => {
             let kind = infer_category_kind(name);
-            let input_enabled = if name == "売上" { 0 } else { 1 };
+            let input_enabled = 1;
             tx.execute(
                 "INSERT INTO categories(name, kind, input_enabled) VALUES(?1, ?2, ?3)",
                 params![name, kind, input_enabled],
@@ -1016,7 +1013,7 @@ fn get_or_create_category(
 
 fn infer_category_kind(category_name: &str) -> &'static str {
     match category_name {
-        "本業売上" | "出前売上" | "売上" => "income",
+        "売上" | "雑収入" | "本業売上" | "出前売上" => "income",
         _ => "expense",
     }
 }
@@ -1190,7 +1187,7 @@ mod tests {
     }
 
     #[test]
-    fn sales_category_is_input_disabled() {
+    fn sales_category_is_input_enabled() {
         let conn = Connection::open_in_memory().expect("in memory db");
         initialize_schema(&conn).expect("schema");
         seed_default_categories(&conn).expect("seed categories");
@@ -1204,7 +1201,7 @@ mod tests {
             .expect("query");
 
         assert_eq!(kind, "income");
-        assert_eq!(input_enabled, 0);
+        assert_eq!(input_enabled, 1);
     }
 
     #[test]
@@ -1219,14 +1216,10 @@ mod tests {
             .query_row("SELECT id FROM profiles WHERE name='父'", [], |r| r.get(0))
             .expect("profile id");
         let income_id: i64 = conn
-            .query_row(
-                "SELECT id FROM categories WHERE name='本業売上'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT id FROM categories WHERE name='売上'", [], |r| r.get(0))
             .expect("income id");
         let expense_id: i64 = conn
-            .query_row("SELECT id FROM categories WHERE name='交通費'", [], |r| {
+            .query_row("SELECT id FROM categories WHERE name='旅費交通費'", [], |r| {
                 r.get(0)
             })
             .expect("expense id");
