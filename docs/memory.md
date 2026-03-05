@@ -25,3 +25,9 @@
 - 12:30 JSTに8agents（implementerスキップ）で品質ゲート再実行:
   - `npm test` / `npm run typecheck` / `cargo test` / `npm run build` 全通過
   - 公式サマリー: `docs/runlogs/20260305-123000-8agents-test-docs-summary.md`
+- GitHub配布対応:
+  - `v*` タグでWindowsインストーラ（`.exe`/`.msi`）をReleasesへ自動添付するワークフローを追加
+  - READMEを利用者向けダウンロード手順・開発者向けリリース手順へ再構成
+  - 配布方式の決定を `docs/decisions/ADR-0002-github-release-distribution.md` に記録
+- `identifier` を GitHub ID ベースへ変更: `io.github.re09o1v.shinkoku-kun`
+- 既存DBを `com.daiki.tauri-app` から新保存先へコピーして移行

@@ -1,7 +1,8 @@
 {
-  "name": "tauri-app",
+  "name": "shinkoku-kun",
   "private": true,
   "version": "0.1.0",
+  "description": "Windows desktop app for simple Japanese white-tax receipt aggregation",
   "type": "module",
   "scripts": {
     "dev": "vite",
