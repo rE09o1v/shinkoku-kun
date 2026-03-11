@@ -132,6 +132,22 @@ export async function deleteEntry(id: number): Promise<void> {
   return invoke<void>("delete_entry", { id });
 }
 
+export async function deleteEntries(entryIds: number[]): Promise<void> {
+  return invoke<void>("delete_entries", { entryIds });
+}
+
+export async function migrateEntriesToProfile(
+  entryIds: number[],
+  sourceProfileId: number,
+  targetProfileId: number,
+): Promise<void> {
+  return invoke<void>("move_entries_to_profile", {
+    entryIds,
+    targetProfileId,
+    sourceProfileId,
+  });
+}
+
 export async function getMonthlySummary(
   profileId: number,
   year: number,

@@ -1,7 +1,7 @@
 {
   "name": "shinkoku-kun",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Windows desktop app for simple Japanese white-tax receipt aggregation",
   "type": "module",
   "scripts": {
@@ -10,21 +10,27 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "node scripts/tauri-wrapper.mjs"
   },
   "dependencies": {
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-opener": "^2"
+    "@tauri-apps/plugin-opener": "^2",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "optionalDependencies": {
+    "@rollup/rollup-linux-x64-gnu": "4.59.0",
+    "@rollup/rollup-win32-x64-msvc": "4.59.0",
+    "@tauri-apps/cli-linux-x64-gnu": "2.10.1",
+    "@tauri-apps/cli-win32-x64-msvc": "2.10.1"
   },
   "devDependencies": {
-    "vitest": "^3.2.4",
+    "@tauri-apps/cli": "^2",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
     "typescript": "~5.8.3",
     "vite": "^7.0.4",
-    "@tauri-apps/cli": "^2"
+    "vitest": "^3.2.4"
   }
 }

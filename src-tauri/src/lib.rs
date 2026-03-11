@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
@@ -717,6 +717,103 @@ fn delete_entry(app: AppHandle, id: i64) -> Result<(), String> {
     Ok(())
 }
 
+fn delete_entries_in_connection(conn: &mut Connection, entry_ids: Vec<i64>) -> Result<(), String> {
+    let normalized_ids = normalize_entry_ids(entry_ids)?;
+    let placeholder_sql = sql_placeholders(normalized_ids.len());
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("トランザクション開始に失敗しました: {e}"))?;
+
+    let deleted = tx
+        .execute(
+            &format!("DELETE FROM entries WHERE id IN ({placeholder_sql})"),
+            rusqlite::params_from_iter(normalized_ids.iter()),
+        )
+        .map_err(|e| format!("明細一括削除に失敗しました: {e}"))?;
+
+    if deleted != normalized_ids.len() {
+        return Err("削除対象の明細が見つかりません".to_string());
+    }
+
+    tx.commit()
+        .map_err(|e| format!("明細一括削除の確定に失敗しました: {e}"))?;
+    Ok(())
+}
+
+fn move_entries_to_profile_in_connection(
+    conn: &mut Connection,
+    entry_ids: Vec<i64>,
+    source_profile_id: i64,
+    target_profile_id: i64,
+) -> Result<(), String> {
+    let normalized_ids = normalize_entry_ids(entry_ids)?;
+    if source_profile_id <= 0 {
+        return Err("元のプロファイルを選択してください".to_string());
+    }
+    if target_profile_id <= 0 {
+        return Err("移行先プロファイルを選択してください".to_string());
+    }
+    if source_profile_id == target_profile_id {
+        return Err("移行先プロファイルは現在のプロファイルと別にしてください".to_string());
+    }
+
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("トランザクション開始に失敗しました: {e}"))?;
+
+    ensure_profile_exists(&tx, source_profile_id, "元プロファイル")?;
+    ensure_profile_exists(&tx, target_profile_id, "移行先プロファイル")?;
+
+    let placeholder_sql = sql_placeholders(normalized_ids.len());
+    let matched_rows: i64 = tx
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM entries WHERE profile_id = ?1 AND id IN ({placeholder_sql})"
+            ),
+            rusqlite::params_from_iter(std::iter::once(&source_profile_id).chain(normalized_ids.iter())),
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("移行対象の明細確認に失敗しました: {e}"))?;
+
+    if matched_rows != normalized_ids.len() as i64 {
+        return Err("選択中の明細が現在のプロファイルと一致しません".to_string());
+    }
+
+    let updated = tx
+        .execute(
+            &format!(
+                "UPDATE entries SET profile_id = ?1, updated_at = CURRENT_TIMESTAMP WHERE id IN ({placeholder_sql})"
+            ),
+            rusqlite::params_from_iter(std::iter::once(&target_profile_id).chain(normalized_ids.iter())),
+        )
+        .map_err(|e| format!("明細一括移行に失敗しました: {e}"))?;
+
+    if updated != normalized_ids.len() {
+        return Err("移行対象の明細を更新できませんでした".to_string());
+    }
+
+    tx.commit()
+        .map_err(|e| format!("明細一括移行の確定に失敗しました: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_entries(app: AppHandle, entry_ids: Vec<i64>) -> Result<(), String> {
+    let mut conn = open_connection(&app)?;
+    delete_entries_in_connection(&mut conn, entry_ids)
+}
+
+#[tauri::command]
+fn move_entries_to_profile(
+    app: AppHandle,
+    entry_ids: Vec<i64>,
+    source_profile_id: i64,
+    target_profile_id: i64,
+) -> Result<(), String> {
+    let mut conn = open_connection(&app)?;
+    move_entries_to_profile_in_connection(&mut conn, entry_ids, source_profile_id, target_profile_id)
+}
+
 fn get_entry_by_id(conn: &Connection, id: i64) -> Result<Entry, String> {
     conn.query_row(
         r#"
@@ -1138,6 +1235,8 @@ pub fn run() {
             create_entry,
             update_entry,
             delete_entry,
+            delete_entries,
+            move_entries_to_profile,
             get_monthly_summary,
             get_yearly_summary,
             save_last_selection,
@@ -1240,4 +1339,225 @@ mod tests {
         assert_eq!(summary.expense_total, 30000);
         assert_eq!(summary.net, 70000);
     }
+
+    #[test]
+    fn delete_entries_removes_each_selected_entry_once() {
+        let mut conn = Connection::open_in_memory().expect("in memory db");
+        initialize_schema(&conn).expect("schema");
+        seed_default_categories(&conn).expect("seed categories");
+        conn.execute("INSERT INTO profiles(name) VALUES('父')", [])
+            .expect("profile");
+
+        let profile_id: i64 = conn
+            .query_row("SELECT id FROM profiles WHERE name='父'", [], |r| r.get(0))
+            .expect("profile id");
+        let category_id: i64 = conn
+            .query_row("SELECT id FROM categories WHERE name='旅費交通費'", [], |r| {
+                r.get(0)
+            })
+            .expect("category id");
+
+        conn.execute(
+            "INSERT INTO entries(profile_id, year, month, category_id, amount, source) VALUES(?1, 2024, 1, ?2, 1000, 'manual')",
+            params![profile_id, category_id],
+        )
+        .expect("entry 1");
+        let first_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO entries(profile_id, year, month, category_id, amount, source) VALUES(?1, 2024, 1, ?2, 2000, 'manual')",
+            params![profile_id, category_id],
+        )
+        .expect("entry 2");
+        let second_id = conn.last_insert_rowid();
+
+        delete_entries_in_connection(&mut conn, vec![first_id, second_id, first_id]).expect("delete");
+
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))
+            .expect("remaining count");
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn migrate_entries_to_profile_moves_selected_entries_only() {
+        let mut conn = Connection::open_in_memory().expect("in memory db");
+        initialize_schema(&conn).expect("schema");
+        seed_default_categories(&conn).expect("seed categories");
+        conn.execute("INSERT INTO profiles(name) VALUES('父')", [])
+            .expect("source profile");
+        conn.execute("INSERT INTO profiles(name) VALUES('母')", [])
+            .expect("target profile");
+
+        let source_profile_id: i64 = conn
+            .query_row("SELECT id FROM profiles WHERE name='父'", [], |r| r.get(0))
+            .expect("source profile id");
+        let target_profile_id: i64 = conn
+            .query_row("SELECT id FROM profiles WHERE name='母'", [], |r| r.get(0))
+            .expect("target profile id");
+        let category_id: i64 = conn
+            .query_row("SELECT id FROM categories WHERE name='旅費交通費'", [], |r| {
+                r.get(0)
+            })
+            .expect("category id");
+
+        conn.execute(
+            "INSERT INTO entries(profile_id, year, month, category_id, amount, source) VALUES(?1, 2024, 1, ?2, 1000, 'manual')",
+            params![source_profile_id, category_id],
+        )
+        .expect("entry 1");
+        let moved_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO entries(profile_id, year, month, category_id, amount, source) VALUES(?1, 2024, 1, ?2, 2000, 'manual')",
+            params![source_profile_id, category_id],
+        )
+        .expect("entry 2");
+        let remaining_id = conn.last_insert_rowid();
+
+        move_entries_to_profile_in_connection(
+            &mut conn,
+            vec![moved_id],
+            source_profile_id,
+            target_profile_id,
+        )
+        .expect("migrate");
+
+        let moved_profile: i64 = conn
+            .query_row(
+                "SELECT profile_id FROM entries WHERE id = ?1",
+                params![moved_id],
+                |r| r.get(0),
+            )
+            .expect("moved profile");
+        let remaining_profile: i64 = conn
+            .query_row(
+                "SELECT profile_id FROM entries WHERE id = ?1",
+                params![remaining_id],
+                |r| r.get(0),
+            )
+            .expect("remaining profile");
+
+        assert_eq!(moved_profile, target_profile_id);
+        assert_eq!(remaining_profile, source_profile_id);
+    }
+
+    #[test]
+    fn migrate_entries_to_profile_rejects_missing_target_profile() {
+        let mut conn = Connection::open_in_memory().expect("in memory db");
+        initialize_schema(&conn).expect("schema");
+        seed_default_categories(&conn).expect("seed categories");
+        conn.execute("INSERT INTO profiles(name) VALUES('父')", [])
+            .expect("profile");
+
+        let profile_id: i64 = conn
+            .query_row("SELECT id FROM profiles WHERE name='父'", [], |r| r.get(0))
+            .expect("profile id");
+        let category_id: i64 = conn
+            .query_row("SELECT id FROM categories WHERE name='旅費交通費'", [], |r| {
+                r.get(0)
+            })
+            .expect("category id");
+
+        conn.execute(
+            "INSERT INTO entries(profile_id, year, month, category_id, amount, source) VALUES(?1, 2024, 1, ?2, 1000, 'manual')",
+            params![profile_id, category_id],
+        )
+        .expect("entry");
+        let entry_id = conn.last_insert_rowid();
+
+        let error = move_entries_to_profile_in_connection(&mut conn, vec![entry_id], profile_id, 9999)
+            .expect_err("missing target profile should fail");
+        assert_eq!(error, "移行先プロファイルが見つかりません");
+    }
+
+    #[test]
+    fn migrate_entries_to_profile_rejects_entries_outside_source_profile() {
+        let mut conn = Connection::open_in_memory().expect("in memory db");
+        initialize_schema(&conn).expect("schema");
+        seed_default_categories(&conn).expect("seed categories");
+        conn.execute("INSERT INTO profiles(name) VALUES('父')", [])
+            .expect("source profile");
+        conn.execute("INSERT INTO profiles(name) VALUES('母')", [])
+            .expect("target profile");
+        conn.execute("INSERT INTO profiles(name) VALUES('子')", [])
+            .expect("other profile");
+
+        let source_profile_id: i64 = conn
+            .query_row("SELECT id FROM profiles WHERE name='父'", [], |r| r.get(0))
+            .expect("source profile id");
+        let target_profile_id: i64 = conn
+            .query_row("SELECT id FROM profiles WHERE name='母'", [], |r| r.get(0))
+            .expect("target profile id");
+        let other_profile_id: i64 = conn
+            .query_row("SELECT id FROM profiles WHERE name='子'", [], |r| r.get(0))
+            .expect("other profile id");
+        let category_id: i64 = conn
+            .query_row("SELECT id FROM categories WHERE name='旅費交通費'", [], |r| {
+                r.get(0)
+            })
+            .expect("category id");
+
+        conn.execute(
+            "INSERT INTO entries(profile_id, year, month, category_id, amount, source) VALUES(?1, 2024, 1, ?2, 1000, 'manual')",
+            params![other_profile_id, category_id],
+        )
+        .expect("entry");
+        let entry_id = conn.last_insert_rowid();
+
+        let error = move_entries_to_profile_in_connection(
+            &mut conn,
+            vec![entry_id],
+            source_profile_id,
+            target_profile_id,
+        )
+        .expect_err("wrong source profile should fail");
+
+        assert_eq!(
+            error,
+            "選択中の明細が現在のプロファイルと一致しません"
+        );
+    }
+}
+
+fn normalize_entry_ids(entry_ids: Vec<i64>) -> Result<Vec<i64>, String> {
+    let mut unique_ids = Vec::new();
+    let mut seen = HashSet::new();
+
+    for entry_id in entry_ids {
+        if entry_id <= 0 {
+            return Err("明細IDが不正です".to_string());
+        }
+        if seen.insert(entry_id) {
+            unique_ids.push(entry_id);
+        }
+    }
+
+    if unique_ids.is_empty() {
+        return Err("対象の明細を選択してください".to_string());
+    }
+
+    Ok(unique_ids)
+}
+
+fn sql_placeholders(count: usize) -> String {
+    std::iter::repeat("?")
+        .take(count)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn ensure_profile_exists(conn: &Connection, profile_id: i64, label: &str) -> Result<(), String> {
+    let exists: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM profiles WHERE id = ?1",
+            params![profile_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("{label}確認に失敗しました: {e}"))?;
+
+    if exists.is_none() {
+        return Err(format!("{label}が見つかりません"));
+    }
+
+    Ok(())
 }

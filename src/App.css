@@ -155,6 +155,12 @@ button:hover {
   background: rgba(210, 138, 86, 0.18);
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+  transform: none;
+}
+
 button.primary {
   background: linear-gradient(120deg, var(--accent), var(--accent-soft));
   color: #fff;
@@ -203,6 +209,45 @@ button.danger {
   color: var(--accent);
 }
 
+.bulk-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: end;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.bulk-toolbar-meta,
+.bulk-toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.bulk-select-all {
+  min-width: max-content;
+}
+
+.bulk-hint,
+.bulk-count {
+  color: var(--ink-soft);
+  font-size: 0.84rem;
+}
+
+.compact-field {
+  min-width: 220px;
+}
+
+.compact-field select {
+  min-width: 180px;
+}
+
 .table-wrap,
 .table-columns {
   overflow: auto;
@@ -232,6 +277,17 @@ th {
   color: var(--ink-soft);
   font-size: 0.8rem;
   font-weight: 600;
+}
+
+.checkbox-cell {
+  width: 56px;
+  text-align: center;
+}
+
+.empty-row {
+  text-align: center;
+  color: var(--ink-soft);
+  padding: 18px 8px;
 }
 
 .actions {
@@ -326,6 +382,18 @@ th {
 }
 
 @media (max-width: 700px) {
+  .bulk-toolbar > *,
+  .bulk-toolbar-meta,
+  .bulk-toolbar-actions,
+  .compact-field,
+  .compact-field select {
+    width: 100%;
+  }
+
+  .bulk-toolbar {
+    align-items: stretch;
+  }
+
   .entry-grid {
     grid-template-columns: 1fr;
   }

@@ -1,6 +1,6 @@
 [package]
 name = "shinkoku-kun"
-version = "0.1.0"
+version = "0.1.1"
 description = "Desktop ledger app for Japanese white tax filing"
 authors = ["daiki"]
 edition = "2021"

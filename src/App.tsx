@@ -6,12 +6,14 @@ import {
   createEntry,
   createProfile,
   deleteCategoryForce,
+  deleteEntries,
   deleteCategoryMigrate,
   deleteEntry,
   getMonthlySummary,
   getYearlySummary,
   importExcel,
   listEntries,
+  migrateEntriesToProfile,
   saveLastSelection,
   updateCategory,
   updateEntry,
@@ -23,6 +25,12 @@ import {
   type Summary,
 } from "./lib/api";
 import { getInputCategories } from "./lib/category";
+import {
+  areAllEntryIdsSelected,
+  reconcileSelectedEntryIds,
+  toggleAllEntryIds,
+  toggleSelectedEntryId,
+} from "./lib/entrySelection";
 import { formatYen, monthOptions, nowYear } from "./lib/format";
 import { isPositiveIntegerYen, normalizeMonthInput, normalizeYearInput } from "./lib/validation";
 
@@ -49,6 +57,7 @@ type EditingCategory = {
 
 function App() {
   const amountInputRef = useRef<HTMLInputElement>(null);
+  const selectAllEntriesRef = useRef<HTMLInputElement>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [profiles, setProfiles] = useState<Profile[]>([]);
@@ -77,6 +86,9 @@ function App() {
   const [migrateTargetCategoryId, setMigrateTargetCategoryId] = useState("");
 
   const [editingEntry, setEditingEntry] = useState<EditingEntry | null>(null);
+  const [selectedEntryIds, setSelectedEntryIds] = useState<number[]>([]);
+  const [bulkTargetProfileId, setBulkTargetProfileId] = useState("");
+  const [bulkActionSaving, setBulkActionSaving] = useState(false);
 
   const [importPath, setImportPath] = useState("C:\\projects\\shinkoku-kun\\収支内訳.xlsx");
   const [importReplace, setImportReplace] = useState(false);
@@ -85,9 +97,19 @@ function App() {
   const [toast, setToast] = useState<Toast | null>(null);
 
   const inputCategories = useMemo(() => getInputCategories(categories), [categories]);
+  const visibleEntryIds = useMemo(() => entries.map((entry) => entry.id), [entries]);
+  const selectedEntryIdSet = useMemo(() => new Set(selectedEntryIds), [selectedEntryIds]);
   const deletableCategories = useMemo(
     () => categories.filter((c) => c.id !== Number(migrateTargetCategoryId)),
     [categories, migrateTargetCategoryId],
+  );
+  const movableProfiles = useMemo(
+    () => profiles.filter((profile) => profile.id !== selectedProfileId),
+    [profiles, selectedProfileId],
+  );
+  const allEntriesSelected = useMemo(
+    () => areAllEntryIdsSelected(selectedEntryIds, entries),
+    [selectedEntryIds, entries],
   );
 
   useEffect(() => {
@@ -126,6 +148,33 @@ function App() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   });
+
+  useEffect(() => {
+    setSelectedEntryIds((current) => reconcileSelectedEntryIds(current, visibleEntryIds));
+    setEditingEntry((current) =>
+      current && visibleEntryIds.includes(current.id) ? current : null,
+    );
+  }, [visibleEntryIds]);
+
+  useEffect(() => {
+    setSelectedEntryIds([]);
+    setBulkTargetProfileId("");
+    setEditingEntry(null);
+  }, [selectedProfileId, selectedYear, selectedMonth]);
+
+  useEffect(() => {
+    if (bulkTargetProfileId && !movableProfiles.some((profile) => String(profile.id) === bulkTargetProfileId)) {
+      setBulkTargetProfileId("");
+    }
+  }, [bulkTargetProfileId, movableProfiles]);
+
+  useEffect(() => {
+    if (!selectAllEntriesRef.current) {
+      return;
+    }
+    selectAllEntriesRef.current.indeterminate =
+      selectedEntryIds.length > 0 && !allEntriesSelected;
+  }, [allEntriesSelected, selectedEntryIds]);
 
   async function initialize() {
     setLoading(true);
@@ -356,6 +405,8 @@ function App() {
   }
 
   function beginEditEntry(entry: Entry) {
+    setSelectedEntryIds([]);
+    setBulkTargetProfileId("");
     setEditingEntry({
       id: entry.id,
       year: String(entry.year),
@@ -402,6 +453,90 @@ function App() {
       showSuccess("明細を削除しました。");
     } catch (error) {
       showError(error);
+    }
+  }
+
+  async function handleDeleteSelectedEntries() {
+    if (selectedEntryIds.length === 0) {
+      setToast({ kind: "info", message: "削除する明細を選択してください。" });
+      return;
+    }
+    if (editingEntry) {
+      setToast({ kind: "info", message: "編集中の明細を保存または取消してから一括操作してください。" });
+      return;
+    }
+    if (bulkActionSaving) {
+      return;
+    }
+
+    const deleteCount = selectedEntryIds.length;
+    if (!window.confirm(`選択中の${deleteCount}件を削除します。よろしいですか？`)) {
+      return;
+    }
+
+    setBulkActionSaving(true);
+    try {
+      await deleteEntries(selectedEntryIds);
+      setSelectedEntryIds([]);
+      setBulkTargetProfileId("");
+      await refreshLedger();
+      showSuccess(`${deleteCount}件の明細を削除しました。`);
+    } catch (error) {
+      showError(error);
+    } finally {
+      setBulkActionSaving(false);
+    }
+  }
+
+  async function handleMoveSelectedEntries() {
+    if (selectedEntryIds.length === 0) {
+      setToast({ kind: "info", message: "移行する明細を選択してください。" });
+      return;
+    }
+    if (editingEntry) {
+      setToast({ kind: "info", message: "編集中の明細を保存または取消してから一括操作してください。" });
+      return;
+    }
+    if (!selectedProfileId) {
+      setToast({ kind: "info", message: "元のプロファイルを選択してください。" });
+      return;
+    }
+    const targetProfileId = Number(bulkTargetProfileId);
+    if (!targetProfileId) {
+      setToast({ kind: "info", message: "移行先プロファイルを選択してください。" });
+      return;
+    }
+    if (targetProfileId === selectedProfileId) {
+      setToast({ kind: "info", message: "移行先プロファイルは現在のプロファイルと別にしてください。" });
+      return;
+    }
+    if (bulkActionSaving) {
+      return;
+    }
+
+    const moveCount = selectedEntryIds.length;
+    const targetProfile = profiles.find((profile) => profile.id === targetProfileId);
+    if (
+      !window.confirm(
+        `選択中の${moveCount}件を「${targetProfile?.name ?? "別プロファイル"}」へ移行します。よろしいですか？`,
+      )
+    ) {
+      return;
+    }
+
+    setBulkActionSaving(true);
+    try {
+      await migrateEntriesToProfile(selectedEntryIds, selectedProfileId, targetProfileId);
+      setSelectedEntryIds([]);
+      await refreshLedger();
+      setBulkTargetProfileId("");
+      showSuccess(
+        `${moveCount}件の明細を${targetProfile?.name ?? "別プロファイル"}へ移行しました。`,
+      );
+    } catch (error) {
+      showError(error);
+    } finally {
+      setBulkActionSaving(false);
     }
   }
 
@@ -582,10 +717,75 @@ function App() {
 
         <section className="panel entries-panel">
           <h2>明細</h2>
+          <div className="bulk-toolbar">
+            <div className="bulk-toolbar-meta">
+              <label className="checkbox-label bulk-select-all">
+                <input
+                  ref={selectAllEntriesRef}
+                  type="checkbox"
+                  checked={allEntriesSelected}
+                  onChange={() =>
+                    setSelectedEntryIds((current) => toggleAllEntryIds(current, entries))
+                  }
+                  disabled={entries.length === 0 || bulkActionSaving || Boolean(editingEntry)}
+                />
+                すべて選択
+              </label>
+              <span className="bulk-count">{selectedEntryIds.length}件選択中</span>
+              <span className="bulk-hint">
+                {editingEntry
+                  ? "編集中は一括操作を停止しています。"
+                  : "表示中の明細だけが選択対象です。"}
+              </span>
+            </div>
+            <div className="bulk-toolbar-actions">
+              <label className="compact-field">
+                移行先プロファイル
+                <select
+                  value={bulkTargetProfileId}
+                  disabled={
+                    selectedEntryIds.length === 0 ||
+                    movableProfiles.length === 0 ||
+                    bulkActionSaving ||
+                    Boolean(editingEntry)
+                  }
+                  onChange={(e) => setBulkTargetProfileId(e.currentTarget.value)}
+                >
+                  <option value="">選択してください</option>
+                  {movableProfiles.map((profile) => (
+                    <option key={profile.id} value={profile.id}>
+                      {profile.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                type="button"
+                className="danger"
+                disabled={selectedEntryIds.length === 0 || bulkActionSaving || Boolean(editingEntry)}
+                onClick={() => void handleDeleteSelectedEntries()}
+              >
+                {bulkActionSaving ? "処理中..." : "選択分を削除"}
+              </button>
+              <button
+                type="button"
+                disabled={
+                  selectedEntryIds.length === 0 ||
+                  !bulkTargetProfileId ||
+                  bulkActionSaving ||
+                  Boolean(editingEntry)
+                }
+                onClick={() => void handleMoveSelectedEntries()}
+              >
+                {bulkActionSaving ? "処理中..." : "選択分を移行"}
+              </button>
+            </div>
+          </div>
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
+                  <th className="checkbox-cell">選択</th>
                   <th>年</th>
                   <th>月</th>
                   <th>カテゴリ</th>
@@ -599,6 +799,18 @@ function App() {
                   const isEditing = editingEntry?.id === entry.id;
                   return (
                     <tr key={entry.id}>
+                      <td className="checkbox-cell">
+                        <input
+                          type="checkbox"
+                          checked={selectedEntryIdSet.has(entry.id)}
+                          onChange={() =>
+                            setSelectedEntryIds((current) =>
+                              toggleSelectedEntryId(current, entry.id),
+                            )
+                          }
+                          disabled={bulkActionSaving || Boolean(editingEntry)}
+                        />
+                      </td>
                       {isEditing ? (
                         <>
                           <td>
@@ -658,10 +870,18 @@ function App() {
                             />
                           </td>
                           <td className="actions">
-                            <button type="button" onClick={() => void handleUpdateEntry()}>
+                            <button
+                              type="button"
+                              disabled={bulkActionSaving}
+                              onClick={() => void handleUpdateEntry()}
+                            >
                               保存
                             </button>
-                            <button type="button" onClick={() => setEditingEntry(null)}>
+                            <button
+                              type="button"
+                              disabled={bulkActionSaving}
+                              onClick={() => setEditingEntry(null)}
+                            >
                               取消
                             </button>
                           </td>
@@ -674,10 +894,18 @@ function App() {
                           <td>¥{formatYen(entry.amount)}</td>
                           <td>{entry.memo}</td>
                           <td className="actions">
-                            <button type="button" onClick={() => beginEditEntry(entry)}>
+                            <button
+                              type="button"
+                              disabled={bulkActionSaving}
+                              onClick={() => beginEditEntry(entry)}
+                            >
                               編集
                             </button>
-                            <button type="button" onClick={() => void handleDeleteEntry(entry.id)}>
+                            <button
+                              type="button"
+                              disabled={bulkActionSaving}
+                              onClick={() => void handleDeleteEntry(entry.id)}
+                            >
                               削除
                             </button>
                           </td>
@@ -686,6 +914,13 @@ function App() {
                     </tr>
                   );
                 })}
+                {entries.length === 0 && (
+                  <tr>
+                    <td colSpan={7} className="empty-row">
+                      表示対象の明細はありません。
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
