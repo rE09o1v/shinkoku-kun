@@ -41,7 +41,7 @@ jobs:
           cargo test --manifest-path src-tauri/Cargo.toml
 
       - name: Build Tauri app
-        run: npm run tauri build
+        run: node node_modules/@tauri-apps/cli/tauri.js build
 
       - name: Publish GitHub Release assets
         uses: softprops/action-gh-release@v2
