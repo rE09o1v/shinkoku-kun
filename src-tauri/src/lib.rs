@@ -84,6 +84,13 @@ struct ImportReport {
     categories_created: i64,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FixedCostCreateResult {
+    created_count: i64,
+    skipped_months: Vec<i32>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EntryDraft {
@@ -94,6 +101,16 @@ struct EntryDraft {
     amount: i64,
     memo: Option<String>,
     source: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FixedCostDraft {
+    profile_id: i64,
+    year: i32,
+    category_id: i64,
+    amount: i64,
+    memo: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -280,6 +297,96 @@ fn validate_manual_category_inputable(
         Some(_) => Err("このカテゴリは新規入力では選択できません".to_string()),
         None => Err("カテゴリが存在しません".to_string()),
     }
+}
+
+fn validate_entry_target(
+    conn: &Connection,
+    profile_id: i64,
+    category_id: i64,
+    source: &str,
+) -> Result<(), String> {
+    ensure_profile_exists(conn, profile_id, "プロファイル")?;
+    validate_manual_category_inputable(conn, category_id, source)
+}
+
+fn validate_fixed_cost_category(conn: &Connection, category_id: i64) -> Result<(), String> {
+    let kind: Option<String> = conn
+        .query_row(
+            "SELECT kind FROM categories WHERE id = ?1",
+            params![category_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("カテゴリ確認に失敗しました: {e}"))?;
+
+    match kind.as_deref() {
+        Some("expense") => Ok(()),
+        Some(_) => Err("固定費は支出カテゴリで登録してください".to_string()),
+        None => Err("カテゴリが存在しません".to_string()),
+    }
+}
+
+fn insert_entry_record(
+    conn: &Connection,
+    profile_id: i64,
+    year: i32,
+    month: i32,
+    category_id: i64,
+    amount: i64,
+    memo: Option<&str>,
+    source: &str,
+) -> Result<(), String> {
+    validate_year_month(year, month)?;
+    validate_amount(amount)?;
+
+    conn.execute(
+        r#"
+        INSERT INTO entries(profile_id, year, month, category_id, amount, memo, source)
+        VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "#,
+        params![profile_id, year, month, category_id, amount, memo, source],
+    )
+    .map_err(|e| format!("明細作成に失敗しました: {e}"))?;
+
+    Ok(())
+}
+
+fn fixed_cost_entry_exists(
+    conn: &Connection,
+    profile_id: i64,
+    year: i32,
+    month: i32,
+    category_id: i64,
+    amount: i64,
+    memo: Option<&str>,
+) -> Result<bool, String> {
+    let existing: Option<i64> = conn
+        .query_row(
+            r#"
+            SELECT id
+            FROM entries
+            WHERE profile_id = ?1
+              AND year = ?2
+              AND month = ?3
+              AND category_id = ?4
+              AND amount = ?5
+              AND COALESCE(memo, '') = ?6
+            LIMIT 1
+            "#,
+            params![
+                profile_id,
+                year,
+                month,
+                category_id,
+                amount,
+                memo.unwrap_or("")
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("既存固定費明細の確認に失敗しました: {e}"))?;
+
+    Ok(existing.is_some())
 }
 
 fn get_profiles(conn: &Connection) -> Result<Vec<Profile>, String> {
@@ -633,29 +740,19 @@ fn list_entries(
 
 #[tauri::command]
 fn create_entry(app: AppHandle, draft: EntryDraft) -> Result<Entry, String> {
-    validate_year_month(draft.year, draft.month)?;
-    validate_amount(draft.amount)?;
-
     let conn = open_connection(&app)?;
     let source = draft.source.unwrap_or_else(|| "manual".to_string());
-    validate_manual_category_inputable(&conn, draft.category_id, &source)?;
-
-    conn.execute(
-        r#"
-        INSERT INTO entries(profile_id, year, month, category_id, amount, memo, source)
-        VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
-        "#,
-        params![
-            draft.profile_id,
-            draft.year,
-            draft.month,
-            draft.category_id,
-            draft.amount,
-            draft.memo,
-            source
-        ],
-    )
-    .map_err(|e| format!("明細作成に失敗しました: {e}"))?;
+    validate_entry_target(&conn, draft.profile_id, draft.category_id, &source)?;
+    insert_entry_record(
+        &conn,
+        draft.profile_id,
+        draft.year,
+        draft.month,
+        draft.category_id,
+        draft.amount,
+        draft.memo.as_deref(),
+        &source,
+    )?;
 
     let id = conn.last_insert_rowid();
     get_entry_by_id(&conn, id)
@@ -667,7 +764,7 @@ fn update_entry(app: AppHandle, id: i64, draft: EntryDraft) -> Result<Entry, Str
     validate_amount(draft.amount)?;
     let conn = open_connection(&app)?;
     let source = draft.source.unwrap_or_else(|| "manual".to_string());
-    validate_manual_category_inputable(&conn, draft.category_id, &source)?;
+    validate_entry_target(&conn, draft.profile_id, draft.category_id, &source)?;
 
     let affected = conn
         .execute(
@@ -812,6 +909,70 @@ fn move_entries_to_profile(
 ) -> Result<(), String> {
     let mut conn = open_connection(&app)?;
     move_entries_to_profile_in_connection(&mut conn, entry_ids, source_profile_id, target_profile_id)
+}
+
+fn create_fixed_cost_entries_in_connection(
+    conn: &mut Connection,
+    draft: FixedCostDraft,
+) -> Result<FixedCostCreateResult, String> {
+    validate_year_month(draft.year, 1)?;
+    validate_amount(draft.amount)?;
+
+    let source = "manual";
+    let memo = draft.memo.as_deref();
+    ensure_profile_exists(conn, draft.profile_id, "対象プロファイル")?;
+    validate_manual_category_inputable(conn, draft.category_id, source)?;
+    validate_fixed_cost_category(conn, draft.category_id)?;
+
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("トランザクション開始に失敗しました: {e}"))?;
+    let mut created_count = 0_i64;
+    let mut skipped_months = Vec::new();
+
+    for month in 1..=12 {
+        if fixed_cost_entry_exists(
+            &tx,
+            draft.profile_id,
+            draft.year,
+            month,
+            draft.category_id,
+            draft.amount,
+            memo,
+        )? {
+            skipped_months.push(month);
+            continue;
+        }
+
+        insert_entry_record(
+            &tx,
+            draft.profile_id,
+            draft.year,
+            month,
+            draft.category_id,
+            draft.amount,
+            memo,
+            source,
+        )
+        .map_err(|e| format!("固定費の毎月登録に失敗しました: {e}"))?;
+        created_count += 1;
+    }
+
+    tx.commit()
+        .map_err(|e| format!("固定費登録の確定に失敗しました: {e}"))?;
+    Ok(FixedCostCreateResult {
+        created_count,
+        skipped_months,
+    })
+}
+
+#[tauri::command]
+fn create_fixed_cost_entries(
+    app: AppHandle,
+    draft: FixedCostDraft,
+) -> Result<FixedCostCreateResult, String> {
+    let mut conn = open_connection(&app)?;
+    create_fixed_cost_entries_in_connection(&mut conn, draft)
 }
 
 fn get_entry_by_id(conn: &Connection, id: i64) -> Result<Entry, String> {
@@ -1233,6 +1394,7 @@ pub fn run() {
             delete_category_migrate,
             list_entries,
             create_entry,
+            create_fixed_cost_entries,
             update_entry,
             delete_entry,
             delete_entries,
@@ -1515,6 +1677,158 @@ mod tests {
             error,
             "選択中の明細が現在のプロファイルと一致しません"
         );
+    }
+
+    #[test]
+    fn create_fixed_cost_entries_creates_missing_months_and_skips_existing_duplicates() {
+        let mut conn = Connection::open_in_memory().expect("in memory db");
+        initialize_schema(&conn).expect("schema");
+        seed_default_categories(&conn).expect("seed categories");
+        conn.execute("INSERT INTO profiles(name) VALUES('父')", [])
+            .expect("profile");
+
+        let profile_id: i64 = conn
+            .query_row("SELECT id FROM profiles WHERE name='父'", [], |r| r.get(0))
+            .expect("profile id");
+        let category_id: i64 = conn
+            .query_row("SELECT id FROM categories WHERE name='地代家賃'", [], |r| {
+                r.get(0)
+            })
+            .expect("category id");
+
+        conn.execute(
+            "INSERT INTO entries(profile_id, year, month, category_id, amount, memo, source) VALUES(?1, 2024, 3, ?2, 80000, '家賃', 'manual')",
+            params![profile_id, category_id],
+        )
+        .expect("seed duplicate");
+
+        let created = create_fixed_cost_entries_in_connection(
+            &mut conn,
+            FixedCostDraft {
+                profile_id,
+                year: 2024,
+                category_id,
+                amount: 80000,
+                memo: Some("家賃".to_string()),
+            },
+        )
+        .expect("create fixed cost entries");
+
+        assert_eq!(created.created_count, 11);
+        assert_eq!(created.skipped_months, vec![3]);
+
+        let months: Vec<i32> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT month FROM entries WHERE profile_id = ?1 AND year = 2024 ORDER BY month",
+                )
+                .expect("prepare months");
+            stmt.query_map(params![profile_id], |row| row.get(0))
+                .expect("query months")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect months")
+        };
+
+        assert_eq!(months, (1..=12).collect::<Vec<_>>());
+
+        let summary = summarize_for_period(&conn, profile_id, 2024, None).expect("summary");
+        assert_eq!(summary.expense_total, 960000);
+        assert_eq!(summary.income_total, 0);
+        assert_eq!(summary.net, -960000);
+    }
+
+    #[test]
+    fn create_fixed_cost_entries_rejects_input_disabled_category() {
+        let mut conn = Connection::open_in_memory().expect("in memory db");
+        initialize_schema(&conn).expect("schema");
+        seed_default_categories(&conn).expect("seed categories");
+        conn.execute("INSERT INTO profiles(name) VALUES('父')", [])
+            .expect("profile");
+        conn.execute(
+            "INSERT INTO categories(name, kind, input_enabled) VALUES('固定費テスト', 'expense', 0)",
+            [],
+        )
+        .expect("custom category");
+
+        let profile_id: i64 = conn
+            .query_row("SELECT id FROM profiles WHERE name='父'", [], |r| r.get(0))
+            .expect("profile id");
+        let category_id: i64 = conn
+            .query_row("SELECT id FROM categories WHERE name='固定費テスト'", [], |r| {
+                r.get(0)
+            })
+            .expect("category id");
+
+        let error = create_fixed_cost_entries_in_connection(
+            &mut conn,
+            FixedCostDraft {
+                profile_id,
+                year: 2024,
+                category_id,
+                amount: 80000,
+                memo: Some("家賃".to_string()),
+            },
+        )
+        .expect_err("disabled category should fail");
+
+        assert_eq!(error, "このカテゴリは新規入力では選択できません");
+    }
+
+    #[test]
+    fn create_fixed_cost_entries_rejects_income_category() {
+        let mut conn = Connection::open_in_memory().expect("in memory db");
+        initialize_schema(&conn).expect("schema");
+        seed_default_categories(&conn).expect("seed categories");
+        conn.execute("INSERT INTO profiles(name) VALUES('父')", [])
+            .expect("profile");
+
+        let profile_id: i64 = conn
+            .query_row("SELECT id FROM profiles WHERE name='父'", [], |r| r.get(0))
+            .expect("profile id");
+        let category_id: i64 = conn
+            .query_row("SELECT id FROM categories WHERE name='売上'", [], |r| r.get(0))
+            .expect("category id");
+
+        let error = create_fixed_cost_entries_in_connection(
+            &mut conn,
+            FixedCostDraft {
+                profile_id,
+                year: 2024,
+                category_id,
+                amount: 80000,
+                memo: Some("家賃".to_string()),
+            },
+        )
+        .expect_err("income category should fail");
+
+        assert_eq!(error, "固定費は支出カテゴリで登録してください");
+    }
+
+    #[test]
+    fn create_fixed_cost_entries_rejects_missing_profile() {
+        let mut conn = Connection::open_in_memory().expect("in memory db");
+        initialize_schema(&conn).expect("schema");
+        seed_default_categories(&conn).expect("seed categories");
+
+        let category_id: i64 = conn
+            .query_row("SELECT id FROM categories WHERE name='地代家賃'", [], |r| {
+                r.get(0)
+            })
+            .expect("category id");
+
+        let error = create_fixed_cost_entries_in_connection(
+            &mut conn,
+            FixedCostDraft {
+                profile_id: 9999,
+                year: 2024,
+                category_id,
+                amount: 80000,
+                memo: Some("家賃".to_string()),
+            },
+        )
+        .expect_err("missing profile should fail");
+
+        assert_eq!(error, "対象プロファイルが見つかりません");
     }
 }
 

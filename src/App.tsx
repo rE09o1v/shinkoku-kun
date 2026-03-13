@@ -4,6 +4,7 @@ import {
   bootstrap,
   createCategory,
   createEntry,
+  createFixedCostEntries,
   createProfile,
   deleteCategoryForce,
   deleteEntries,
@@ -72,6 +73,7 @@ function App() {
   const [selectedCategoryId, setSelectedCategoryId] = useState("");
   const [amount, setAmount] = useState("");
   const [memo, setMemo] = useState("");
+  const [applyFixedCostYearly, setApplyFixedCostYearly] = useState(false);
 
   const [newProfileName, setNewProfileName] = useState("");
   const [renameProfileName, setRenameProfileName] = useState("");
@@ -97,6 +99,10 @@ function App() {
   const [toast, setToast] = useState<Toast | null>(null);
 
   const inputCategories = useMemo(() => getInputCategories(categories), [categories]);
+  const selectedCategory = useMemo(
+    () => categories.find((category) => String(category.id) === selectedCategoryId) ?? null,
+    [categories, selectedCategoryId],
+  );
   const visibleEntryIds = useMemo(() => entries.map((entry) => entry.id), [entries]);
   const selectedEntryIdSet = useMemo(() => new Set(selectedEntryIds), [selectedEntryIds]);
   const deletableCategories = useMemo(
@@ -167,6 +173,12 @@ function App() {
       setBulkTargetProfileId("");
     }
   }, [bulkTargetProfileId, movableProfiles]);
+
+  useEffect(() => {
+    if (applyFixedCostYearly && selectedCategory?.kind !== "expense") {
+      setApplyFixedCostYearly(false);
+    }
+  }, [applyFixedCostYearly, selectedCategory]);
 
   useEffect(() => {
     if (!selectAllEntriesRef.current) {
@@ -373,6 +385,10 @@ function App() {
       setToast({ kind: "info", message: "カテゴリを選択してください。" });
       return;
     }
+    if (applyFixedCostYearly && selectedCategory?.kind !== "expense") {
+      setToast({ kind: "info", message: "固定費は支出カテゴリで登録してください。" });
+      return;
+    }
     if (!isPositiveIntegerYen(amount)) {
       setToast({ kind: "info", message: "金額は1円以上の整数で入力してください。" });
       return;
@@ -383,7 +399,7 @@ function App() {
 
     setSaving(true);
     try {
-      await createEntry({
+      const draft = {
         profileId: selectedProfileId,
         year,
         month,
@@ -391,12 +407,38 @@ function App() {
         amount: Number(amount),
         memo,
         source: "manual",
-      });
+      };
+      let fixedCostResult: Awaited<ReturnType<typeof createFixedCostEntries>> | null = null;
+      if (applyFixedCostYearly) {
+        fixedCostResult = await createFixedCostEntries({
+          profileId: draft.profileId,
+          year: draft.year,
+          categoryId: draft.categoryId,
+          amount: draft.amount,
+          memo: draft.memo,
+        });
+      } else {
+        await createEntry(draft);
+      }
       setAmount("");
       setMemo("");
+      setApplyFixedCostYearly(false);
       await refreshLedger();
       amountInputRef.current?.focus();
-      showSuccess("明細を登録しました。");
+      if (!fixedCostResult) {
+        showSuccess("明細を登録しました。");
+        return;
+      }
+
+      const skippedLabel =
+        fixedCostResult.skippedMonths.length > 0
+          ? ` 既存の${fixedCostResult.skippedMonths.join("・")}月分はスキップしました。`
+          : "";
+      if (fixedCostResult.createdCount === 0) {
+        setToast({ kind: "info", message: `該当年の固定費はすべて登録済みです。${skippedLabel}` });
+        return;
+      }
+      showSuccess(`固定費を${fixedCostResult.createdCount}か月分登録しました。${skippedLabel}`);
     } catch (error) {
       showError(error);
     } finally {
@@ -653,7 +695,7 @@ function App() {
                 />
               </label>
               <label>
-                月
+                {applyFixedCostYearly ? "月（表示用）" : "月"}
                 <select value={selectedMonth} onChange={(e) => setSelectedMonth(e.currentTarget.value)}>
                   {monthOptions().map((m) => (
                     <option key={m} value={m}>
@@ -690,8 +732,20 @@ function App() {
                 メモ
                 <input value={memo} onChange={(e) => setMemo(e.currentTarget.value)} />
               </label>
+              <label className="checkbox-label span-2 fixed-cost-option">
+                <input
+                  type="checkbox"
+                  checked={applyFixedCostYearly}
+                  disabled={saving || selectedCategory?.kind === "income"}
+                  onChange={(e) => setApplyFixedCostYearly(e.currentTarget.checked)}
+                />
+                <span>
+                  固定費としてこの年の毎月に反映
+                  <small>支出カテゴリのみ。1月から12月まで登録し、同じ明細がある月はスキップします。</small>
+                </span>
+              </label>
               <button className="primary" type="submit" disabled={saving}>
-                {saving ? "登録中..." : "登録"}
+                {saving ? "登録中..." : applyFixedCostYearly ? "毎月登録" : "登録"}
               </button>
             </div>
           </form>

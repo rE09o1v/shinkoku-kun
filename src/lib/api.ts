@@ -61,10 +61,24 @@ export type ImportReport = {
   categoriesCreated: number;
 };
 
+export type FixedCostCreateResult = {
+  createdCount: number;
+  skippedMonths: number[];
+};
+
 export type EntryDraft = {
   profileId: number;
   year: number;
   month: number;
+  categoryId: number;
+  amount: number;
+  memo?: string;
+  source?: string;
+};
+
+export type FixedCostDraft = {
+  profileId: number;
+  year: number;
   categoryId: number;
   amount: number;
   memo?: string;
@@ -122,6 +136,10 @@ export async function listEntries(
 
 export async function createEntry(draft: EntryDraft): Promise<Entry> {
   return invoke<Entry>("create_entry", { draft });
+}
+
+export async function createFixedCostEntries(draft: FixedCostDraft): Promise<FixedCostCreateResult> {
+  return invoke<FixedCostCreateResult>("create_fixed_cost_entries", { draft });
 }
 
 export async function updateEntry(id: number, draft: EntryDraft): Promise<Entry> {

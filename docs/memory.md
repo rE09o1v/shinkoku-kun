@@ -31,3 +31,16 @@
   - 配布方式の決定を `docs/decisions/ADR-0002-github-release-distribution.md` に記録
 - `identifier` を GitHub ID ベースへ変更: `io.github.re09o1v.shinkoku-kun`
 - 既存DBを `com.daiki.tauri-app` から新保存先へコピーして移行
+
+## 2026-03-13
+- 固定費を1回の入力で選択年の毎月へ反映する機能を追加。
+- 実装方針:
+  - 固定費は専用テンプレートではなく、1月から12月の通常明細へ実体化する
+  - 既存の同一明細がある月は重複作成せずスキップする
+  - 固定費の一括入力は支出カテゴリのみ許可する
+- 決定を `docs/decisions/ADR-0003-fixed-cost-yearly-materialization.md` に記録。
+- 品質ゲート:
+  - `cargo test --manifest-path src-tauri/Cargo.toml`
+  - `npm run typecheck`
+  - `npm test`
+  - `npm run build`

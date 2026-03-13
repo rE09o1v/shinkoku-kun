@@ -1,7 +1,7 @@
 {
   "name": "shinkoku-kun",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Windows desktop app for simple Japanese white-tax receipt aggregation",
   "type": "module",
   "scripts": {

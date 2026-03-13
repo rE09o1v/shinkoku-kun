@@ -188,6 +188,19 @@ button.danger {
   gap: 8px;
 }
 
+.fixed-cost-option {
+  align-items: flex-start;
+}
+
+.fixed-cost-option span {
+  display: grid;
+  gap: 2px;
+}
+
+.fixed-cost-option small {
+  color: var(--ink-soft);
+}
+
 .summary-cards {
   display: grid;
   gap: 10px;
